@@ -1,0 +1,9 @@
+{
+  "id" : "fb177654-e80b-4e5b-bbcc-f179e203a6b3",
+  "targets" : [
+    {
+      "id" : "ac458db1-232f-4d6d-b1d1-1aad35b2bbc0",
+      "name" : "macABS"
+    }
+  ]
+}
