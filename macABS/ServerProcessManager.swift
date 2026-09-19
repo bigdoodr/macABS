@@ -87,6 +87,12 @@ final class ServerProcessManager: ObservableObject {
     private var nodeExecutable: URL {
         Bundle.main.resourceURL!.appendingPathComponent("node/bin/node")
     }
+    /// Native arm64 static builds vendored by vendor-audiobookshelf.sh
+    /// (see its comments for why). Audiobookshelf's own BinaryManager
+    /// would otherwise fetch Intel-only ffmpeg/ffprobe from ffbinaries.com
+    /// and run them under Rosetta on every Apple Silicon Mac.
+    private var ffmpegExecutable: URL { workingDirectory.appendingPathComponent("ffmpeg") }
+    private var ffprobeExecutable: URL { workingDirectory.appendingPathComponent("ffprobe") }
     /// Entry point is index.js at the repo root, not server/index.js.
     private let startArgs = ["index.js"]
     /// The native (non-Docker) server defaults to port 3333, not 13378 --
@@ -142,6 +148,16 @@ final class ServerProcessManager: ObservableObject {
         env["PORT"] = String(serverPort)
         env["CONFIG_PATH"] = configPath
         env["METADATA_PATH"] = metadataPath
+        // Point Audiobookshelf directly at the vendored arm64 ffmpeg/ffprobe
+        // and skip its own BinaryManager binary check entirely -- that
+        // check hard-requires a `-version` string starting with "5.1",
+        // which a modern static build won't report, so leaving the check
+        // enabled would cause it to consider our binaries "invalid" and
+        // silently replace them with a downloaded Intel build on every
+        // launch. SKIP_BINARIES_CHECK=1 trusts *_PATH as given instead.
+        env["SKIP_BINARIES_CHECK"] = "1"
+        env["FFMPEG_PATH"] = ffmpegExecutable.path
+        env["FFPROBE_PATH"] = ffprobeExecutable.path
         task.environment = env
 
         let stdoutPipe = Pipe()
@@ -157,8 +173,8 @@ final class ServerProcessManager: ObservableObject {
         }
 
         task.terminationHandler = { [weak self] proc in
+            guard let self else { return }
             Task { @MainActor in
-                guard let self else { return }
                 self.process = nil
                 self.healthCheckTask?.cancel()
                 if self.isIntentionalStop {

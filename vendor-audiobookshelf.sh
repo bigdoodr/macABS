@@ -14,7 +14,8 @@
 # Output layout (this is what gets added to the Xcode project as folder
 # references and copied into Contents/Resources on build):
 #   Vendor/node/bin/node
-#   Vendor/audiobookshelf/  (index.js, server/, client/dist/, node_modules/)
+#   Vendor/audiobookshelf/  (index.js, server/, client/dist/, node_modules/,
+#                            ffmpeg, ffprobe)
 
 set -euo pipefail
 
@@ -26,7 +27,22 @@ NODE_VERSION="22.23.2"
 NODE_ARCH="darwin-arm64"   # Mac mini / Apple Silicon only. Use darwin-x64
                             # for Intel if you ever need to support both.
 ABS_REPO="https://github.com/advplyr/audiobookshelf.git"
-ABS_REF="v2.36.0"           # pin to a tag, not a moving branch
+ABS_REF="v2.36.1"           # pin to a tag, not a moving branch
+
+# Audiobookshelf's own BinaryManager (server/managers/BinaryManager.js)
+# downloads ffmpeg/ffprobe from ffbinaries.com, but that service only
+# publishes Intel (osx-64) builds for macOS -- there is no osx-arm64
+# option there at all. On Apple Silicon that means Audiobookshelf
+# always ends up running ffmpeg/ffprobe under Rosetta 2 unless we
+# override it ourselves. So we vendor native arm64 static builds from
+# eugeneware/ffmpeg-static here and point FFMPEG_PATH/FFPROBE_PATH at
+# them (see ServerProcessManager.swift, which also sets
+# SKIP_BINARIES_CHECK=1 so Audiobookshelf's own version-gated download
+# logic -- which requires a "5.1"-prefixed `-version` string BinaryManager
+# won't get from a modern static build -- never runs and overwrites them).
+FFMPEG_STATIC_TAG="b6.1.1"
+FFMPEG_DARWIN_ARM64_SHA256="a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584"
+FFPROBE_DARWIN_ARM64_SHA256="bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64"
 # -----------------------------------------------------------
 
 NODE_DIST_NAME="node-v${NODE_VERSION}-${NODE_ARCH}"
@@ -152,7 +168,48 @@ vendor_audiobookshelf() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. Strip build-only weight from the vendored Node runtime
+# 3. Native ffmpeg/ffprobe (arm64 -- see note above on why we can't just
+#    let Audiobookshelf's own BinaryManager fetch these)
+# ---------------------------------------------------------------------------
+vendor_ffmpeg() {
+    local base_url="https://github.com/eugeneware/ffmpeg-static/releases/download/${FFMPEG_STATIC_TAG}"
+
+    _fetch_one() {
+        local bin_name="$1" expected_sha="$2"
+        local dest="${VENDOR_ABS_DIR}/${bin_name}"
+
+        if [ -x "${dest}" ] && [ "$(shasum -a 256 "${dest}" | awk '{print $1}')" = "${expected_sha}" ]; then
+            log "${bin_name} already vendored and verified, skipping."
+            return
+        fi
+
+        mkdir -p "${VENDOR_ABS_DIR}"
+        local tmp_gz="${VENDOR_DIR}/${bin_name}-darwin-arm64.gz"
+        log "Downloading ${base_url}/${bin_name}-darwin-arm64.gz"
+        curl -fSL -o "${tmp_gz}" "${base_url}/${bin_name}-darwin-arm64.gz"
+
+        gunzip -c "${tmp_gz}" > "${dest}"
+        rm -f "${tmp_gz}"
+        chmod +x "${dest}"
+
+        local actual_sha
+        actual_sha="$(shasum -a 256 "${dest}" | awk '{print $1}')"
+        if [ "${actual_sha}" != "${expected_sha}" ]; then
+            echo "ERROR: checksum mismatch for ${bin_name}-darwin-arm64" >&2
+            echo "  expected: ${expected_sha}" >&2
+            echo "  actual:   ${actual_sha}" >&2
+            rm -f "${dest}"
+            exit 1
+        fi
+        log "Vendored ${bin_name}: $("${dest}" -version | head -1)"
+    }
+
+    _fetch_one "ffmpeg" "${FFMPEG_DARWIN_ARM64_SHA256}"
+    _fetch_one "ffprobe" "${FFPROBE_DARWIN_ARM64_SHA256}"
+}
+
+# ---------------------------------------------------------------------------
+# 4. Strip build-only weight from the vendored Node runtime
 # ---------------------------------------------------------------------------
 finalize_vendor() {
     # npm itself (lib/node_modules) is only needed for the npm ci / npm run
@@ -174,6 +231,7 @@ finalize_vendor() {
 
 vendor_node
 vendor_audiobookshelf
+vendor_ffmpeg
 finalize_vendor
 
 log "Done. Vendor/ is ready to add to the Xcode project as folder references."
