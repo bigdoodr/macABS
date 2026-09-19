@@ -54,6 +54,7 @@
 				000000000000000130000000 /* Frameworks */,
 				000000000000000140000000 /* Resources */,
 				CAE4703B30294A5F0098A2FF /* ShellScript */,
+				CAFB3004305EC69F00E449C8 /* Sign vendored binaries */,
 			);
 			buildRules = (
 			);
@@ -118,6 +119,24 @@
 				"mkdir -p \"${DEST}\"",
 				"rsync -a --delete \"${PROJECT_DIR}/Vendor/node/\" \"${DEST}/node/\"",
 				"rsync -a --delete \"${PROJECT_DIR}/Vendor/audiobookshelf/\" \"${DEST}/audiobookshelf/\"",
+				"",
+			);
+		};
+		CAFB3004305EC69F00E449C8 /* Sign vendored binaries */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			name = "Sign vendored binaries";
+			shellPath = /bin/sh;
+			shellScript = (
+				"set -euo pipefail",
+				"IDENTITY=\"${EXPANDED_CODE_SIGN_IDENTITY}\"",
+				"for rel in node/bin/node audiobookshelf/ffmpeg audiobookshelf/ffprobe; do",
+				"    BIN=\"${CODESIGNING_FOLDER_PATH}/Contents/Resources/${rel}\"",
+				"    if [ -f \"$BIN\" ]; then",
+				"        echo \"Signing ${rel} for Hardened Runtime\"",
+				"        /usr/bin/codesign --force --sign \"$IDENTITY\" --options runtime --timestamp \"$BIN\"",
+				"    fi",
+				"done",
 				"",
 			);
 		};
@@ -270,6 +289,7 @@
 		000000000000000111000000 /* Debug configuration for PBXNativeTarget "macABS" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
@@ -314,6 +334,7 @@
 		000000000000000112000000 /* Release configuration for PBXNativeTarget "macABS" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ARCHS = arm64;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
