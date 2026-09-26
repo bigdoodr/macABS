@@ -13,7 +13,7 @@ A native macOS menu bar app that runs [Audiobookshelf](https://github.com/advply
 
 ## Requirements
 
-- macOS 13 or later
+- macOS 14 or later
 - Apple Silicon (the bundled Node runtime is currently built for `darwin-arm64` only)
 
 ## Building from source
