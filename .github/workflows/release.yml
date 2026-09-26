@@ -156,27 +156,58 @@ jobs:
             "$RUNNER_TEMP/Export/macABS.app" \
             "dist/macABS-${{ steps.version.outputs.version }}.zip"
 
-      - name: Generate release notes with Claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          prompt: |
-            Find the git tag immediately before ${{ github.ref_name }} (e.g.
-            `git tag --sort=-creatordate` and take the second entry). Then
-            look at `git log <previous-tag>..${{ github.ref_name }}` and
-            `git diff <previous-tag>..${{ github.ref_name }} --stat` to see
-            what actually changed. If there is no previous tag, summarize
-            the full history instead.
+      - name: Determine previous tag
+        id: prev_tag
+        run: |
+          prev="$(git tag --sort=-creatordate | sed -n '2p')"
+          echo "tag=$prev" >> "$GITHUB_OUTPUT"
 
-            Write concise, user-facing release notes in Markdown to
-            RELEASE_NOTES.md at the repo root. Write for someone deciding
-            whether to update the app, not for a developer reading commit
-            messages -- describe user-visible effect, not implementation.
-            Use headings like "Fixes" and "Changes" only where relevant,
-            skip empty sections, and don't include a title line (the
-            release title is set separately).
-          claude_args: |
-            --max-turns 15
+      # anthropics/claude-code-action refuses to run on a plain "push"
+      # event (it's built around issue/PR-comment workflows), which is
+      # exactly how this workflow triggers -- so this calls the Anthropic
+      # API directly instead of going through that action.
+      - name: Generate release notes with Claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+          CUR_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PREV_TAG" ]; then
+            range="$PREV_TAG..$CUR_TAG"
+          else
+            range="$CUR_TAG"
+          fi
+          log="$(git log "$range" --no-merges)"
+          diffstat="$(git diff "$range" --stat)"
+
+          jq -n \
+            --arg model "claude-sonnet-5" \
+            --arg tag "$CUR_TAG" \
+            --arg log "$log" \
+            --arg diffstat "$diffstat" \
+            '{
+              model: $model,
+              max_tokens: 1024,
+              messages: [{
+                role: "user",
+                content: ("Write concise, user-facing release notes in Markdown for macABS " + $tag + ".\n\nWrite for someone deciding whether to update the app, not for a developer reading commit messages -- describe user-visible effect, not implementation. Use headings like \"Fixes\" and \"Changes\" only where relevant, skip empty sections, and do not include a title line.\n\nCommit log:\n" + $log + "\n\nDiffstat:\n" + $diffstat)
+              }]
+            }' > /tmp/request.json
+
+          curl -sS https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/request.json > /tmp/response.json
+
+          if jq -e '.error' /tmp/response.json >/dev/null 2>&1; then
+            echo "Anthropic API error:" >&2
+            jq . /tmp/response.json >&2
+            exit 1
+          fi
+          jq -r '.content[0].text' /tmp/response.json > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
 
       - name: Create GitHub release
         env:
