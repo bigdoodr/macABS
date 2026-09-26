@@ -5,8 +5,8 @@
 	<!--
 	Node's official nodejs.org builds ship signed with these same
 	entitlements. The "Sign vendored binaries" build phase re-signs
-	node with `codesign --force`, which strips whatever entitlements
-	the binary already had -- without re-granting allow-jit here, V8
+	node with codesign's force option, which strips whatever entitlements
+	the binary already had; without re-granting allow-jit here, V8
 	traps (SIGTRAP/EXC_BREAKPOINT) the moment it tries to write-protect
 	its JIT pages during startup, since Hardened Runtime blocks that
 	syscall for unentitled processes.

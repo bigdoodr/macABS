@@ -1,0 +1,192 @@
+name: Release
+
+# Push a tag like "v1.3.0" to trigger a full build -> smoke test -> sign ->
+# notarize -> publish run. Can also be re-run manually from the Actions tab
+# against an existing tag (e.g. to retry after a transient notarization
+# failure -- delete the GitHub release first if you need a clean redo).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DEVELOPMENT_TEAM: C7ZFPH2CB5
+  SCHEME: macABS
+  PROJECT: macABS.xcodeproj
+  HEALTHCHECK_URL: http://localhost:13378/healthcheck
+  BUNDLE_ID: rocks.scruggsfam.macABS
+
+jobs:
+  release:
+    name: Build, sign, notarize, and publish
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history, needed for release-notes diffing
+
+      # GitHub-hosted macos-15 runners don't have Xcode 27 yet (only a
+      # public preview exists as of this writing) -- 26.3 is the newest
+      # available. If this step or the archive step below starts failing
+      # because the project needs a newer Swift/Xcode-only feature, the fix
+      # is to switch this job to a self-hosted runner on a Mac that already
+      # has Xcode 27 installed, not to keep bumping this version.
+      - name: Select Xcode 26.3
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.3"
+
+      - name: Cache vendored Node/Audiobookshelf/ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: Vendor
+          key: vendor-${{ hashFiles('vendor-audiobookshelf.sh') }}
+
+      - name: Vendor Node + Audiobookshelf + ffmpeg
+        run: ./vendor-audiobookshelf.sh
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.CI_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/developer_id.p12"
+          echo -n "$CERT_P12_BASE64" | base64 --decode -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
+
+      - name: Determine version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build_number=$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Archive (Developer ID signed, hardened runtime)
+        run: |
+          xcodebuild -project "$PROJECT" -scheme "$SCHEME" -configuration Release \
+            -archivePath "$RUNNER_TEMP/macABS.xcarchive" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.build_number }}" \
+            OTHER_CODE_SIGN_FLAGS="--timestamp" \
+            archive
+
+      # This is the "builds and runs successfully" gate: launch the actual
+      # signed binary straight out of the archive (no notarization needed
+      # to run locally -- Gatekeeper only cares about quarantined/
+      # downloaded apps) and confirm the Audiobookshelf server comes up.
+      # Catches exactly the class of bug fixed before this pipeline existed
+      # (V8 JIT crash from a re-signed vendored node losing entitlements).
+      - name: Smoke test -- launch app and check server health
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/macABS.xcarchive/Products/Applications/macABS.app"
+          defaults write "$BUNDLE_ID" startServerAutomatically -bool true
+          open "$APP"
+
+          ok=""
+          for i in $(seq 1 30); do
+            if curl -fsS "$HEALTHCHECK_URL" >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+
+          pkill -f "$APP/Contents/MacOS/macABS" || true
+          defaults delete "$BUNDLE_ID" startServerAutomatically || true
+
+          if [ -z "$ok" ]; then
+            echo "Server never responded to healthcheck -- failing before signing/notarizing a broken build." >&2
+            exit 1
+          fi
+          echo "Healthcheck passed."
+
+      - name: Export for Direct Distribution
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/macABS.xcarchive" \
+            -exportOptionsPlist ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/Export"
+
+      - name: Notarize
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_KEY_P8_BASE64: ${{ secrets.ASC_API_PRIVATE_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          KEY_PATH="$RUNNER_TEMP/AuthKey_${ASC_KEY_ID}.p8"
+          echo -n "$ASC_KEY_P8_BASE64" | base64 --decode -o "$KEY_PATH"
+
+          ditto -c -k --keepParent \
+            "$RUNNER_TEMP/Export/macABS.app" \
+            "$RUNNER_TEMP/macABS-notarize.zip"
+
+          xcrun notarytool submit "$RUNNER_TEMP/macABS-notarize.zip" \
+            --key "$KEY_PATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$KEY_PATH"
+
+      - name: Staple notarization ticket
+        run: xcrun stapler staple "$RUNNER_TEMP/Export/macABS.app"
+
+      - name: Package release zip
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent \
+            "$RUNNER_TEMP/Export/macABS.app" \
+            "dist/macABS-${{ steps.version.outputs.version }}.zip"
+
+      - name: Generate release notes with Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Find the git tag immediately before ${{ github.ref_name }} (e.g.
+            `git tag --sort=-creatordate` and take the second entry). Then
+            look at `git log <previous-tag>..${{ github.ref_name }}` and
+            `git diff <previous-tag>..${{ github.ref_name }} --stat` to see
+            what actually changed. If there is no previous tag, summarize
+            the full history instead.
+
+            Write concise, user-facing release notes in Markdown to
+            RELEASE_NOTES.md at the repo root. Write for someone deciding
+            whether to update the app, not for a developer reading commit
+            messages -- describe user-visible effect, not implementation.
+            Use headings like "Fixes" and "Changes" only where relevant,
+            skip empty sections, and don't include a title line (the
+            release title is set separately).
+          claude_args: |
+            --max-turns 15
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            "dist/macABS-${{ steps.version.outputs.version }}.zip" \
+            --title "macABS ${{ steps.version.outputs.version }}" \
+            --notes-file RELEASE_NOTES.md
+
+      - name: Clean up signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
