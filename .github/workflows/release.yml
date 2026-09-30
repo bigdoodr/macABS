@@ -159,7 +159,9 @@ jobs:
       - name: Determine previous tag
         id: prev_tag
         run: |
-          prev="$(git tag --sort=-creatordate | sed -n '2p')"
+          # Only app tags (vX.Y.Z). The "abs-vX.Y.Z" tags created by the
+          # abs-payload workflow must not count as the "previous release".
+          prev="$(git tag --list 'v[0-9]*' --sort=-creatordate | sed -n '2p')"
           echo "tag=$prev" >> "$GITHUB_OUTPUT"
 
       # anthropics/claude-code-action refuses to run on a plain "push"

@@ -11,6 +11,7 @@ import SwiftUI
 
 struct MenuContentView: View {
     @EnvironmentObject private var serverManager: ServerProcessManager
+    @EnvironmentObject private var updater: ABSUpdater
     @State private var showingLogs = false
 
     // Matches ServerProcessManager.serverPort (13378) -- keep these in
@@ -29,11 +30,28 @@ struct MenuContentView: View {
 
             HStack {
                 Button("Start") { serverManager.start() }
-                    .disabled(isRunningOrStarting)
+                    .disabled(isRunningOrStarting || updater.isBusy)
                 Button("Stop") { serverManager.stop() }
-                    .disabled(!isRunningOrStarting)
+                    .disabled(!isRunningOrStarting || updater.isBusy)
                 Button("Restart") { serverManager.restart() }
+                    .disabled(updater.isBusy)
             }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Audiobookshelf \(serverManager.activeVersion)")
+                    .font(.caption)
+                if !updater.statusLine.isEmpty {
+                    Text(updater.statusLine)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Button("Check for Audiobookshelf Update") {
+                Task { await updater.checkNow() }
+            }
+            .disabled(updater.isBusy)
 
             Button("Open Web UI") {
                 NSWorkspace.shared.open(webUIURL)
@@ -59,7 +77,7 @@ struct MenuContentView: View {
             }
         }
         .padding()
-        .frame(width: 220)
+        .frame(width: 260)
         .sheet(isPresented: $showingLogs) {
             LogWindow(lines: serverManager.logLines)
         }

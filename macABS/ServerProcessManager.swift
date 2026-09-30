@@ -81,20 +81,19 @@ final class ServerProcessManager: ObservableObject {
     /// Bundle.main.resourceURL is Contents/Resources inside the running
     /// .app -- resolved at runtime, so this works regardless of where the
     /// app itself is installed (Applications, ~/Downloads, wherever).
-    private var workingDirectory: URL {
-        Bundle.main.resourceURL!.appendingPathComponent("audiobookshelf", isDirectory: true)
-    }
-    private var nodeExecutable: URL {
-        Bundle.main.resourceURL!.appendingPathComponent("node/bin/node")
-    }
-    /// Native arm64 static builds vendored by vendor-audiobookshelf.sh
-    /// (see its comments for why). Audiobookshelf's own BinaryManager
-    /// would otherwise fetch Intel-only ffmpeg/ffprobe from ffbinaries.com
-    /// and run them under Rosetta on every Apple Silicon Mac.
-    private var ffmpegExecutable: URL { workingDirectory.appendingPathComponent("ffmpeg") }
-    private var ffprobeExecutable: URL { workingDirectory.appendingPathComponent("ffprobe") }
-    /// Entry point is index.js at the repo root, not server/index.js.
-    private let startArgs = ["index.js"]
+    ///
+    /// Which runtime actually launches (an updated payload in Application
+    /// Support, or this bundled copy as a fallback) is decided per launch
+    /// by ABSRuntime.active(); see ABSRuntime.swift / ABSUpdater.swift.
+    /// Native arm64 static ffmpeg/ffprobe (see vendor-audiobookshelf.sh for
+    /// why) live next to the server in whichever runtime is active, so
+    /// Audiobookshelf's own BinaryManager never fetches Intel-only builds.
+    /// The entry point comes from the runtime too: index.js up to v2.36,
+    /// dist-server/index.js from v2.37 (server is now compiled TypeScript).
+
+    /// Version of the runtime most recently launched (or the one that will
+    /// launch next, before the first start). Shown in the menu.
+    @Published private(set) var activeVersion: String = ABSRuntime.active().version
     /// The native (non-Docker) server defaults to port 3333, not 13378 --
     /// that 13378 was specifically Docker's external port mapping. Setting
     /// PORT explicitly below keeps it consistent with the port used
@@ -137,10 +136,14 @@ final class ServerProcessManager: ObservableObject {
         state = .starting
         appendLog("Starting server…")
 
+        let runtime = ABSRuntime.active()
+        activeVersion = runtime.version
+        appendLog("Using Audiobookshelf \(runtime.version) (\(runtime.isBundled ? "bundled" : "updated")).")
+
         let task = Process()
-        task.executableURL = nodeExecutable
-        task.arguments = startArgs
-        task.currentDirectoryURL = workingDirectory
+        task.executableURL = runtime.nodeExecutable
+        task.arguments = [runtime.entry]
+        task.currentDirectoryURL = runtime.workingDirectory
 
         // Start from the launching process's own environment (so PATH
         // etc. are intact) and layer ABS-specific config on top.
@@ -156,8 +159,8 @@ final class ServerProcessManager: ObservableObject {
         // silently replace them with a downloaded Intel build on every
         // launch. SKIP_BINARIES_CHECK=1 trusts *_PATH as given instead.
         env["SKIP_BINARIES_CHECK"] = "1"
-        env["FFMPEG_PATH"] = ffmpegExecutable.path
-        env["FFPROBE_PATH"] = ffprobeExecutable.path
+        env["FFMPEG_PATH"] = runtime.workingDirectory.appendingPathComponent("ffmpeg").path
+        env["FFPROBE_PATH"] = runtime.workingDirectory.appendingPathComponent("ffprobe").path
         task.environment = env
 
         let stdoutPipe = Pipe()
@@ -206,6 +209,50 @@ final class ServerProcessManager: ObservableObject {
         healthCheckTask?.cancel()
         process?.terminate()
     }
+
+    /// Stops the server and suspends until the process has really exited
+    /// (escalating to SIGKILL if it ignores SIGTERM), so callers can safely
+    /// swap runtimes or restore config files afterwards.
+    func stopAndWait(timeout: TimeInterval = 20) async {
+        guard process != nil else { return }
+        stop()
+        let deadline = Date().addingTimeInterval(timeout)
+        while process != nil && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        if let stuck = process {
+            appendLog("Server ignored SIGTERM -- sending SIGKILL.")
+            kill(stuck.processIdentifier, SIGKILL)
+            let killDeadline = Date().addingTimeInterval(5)
+            while process != nil && Date() < killDeadline {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+        }
+    }
+
+    /// After start(): true once the health check passes, false if the
+    /// process dies or the timeout elapses first.
+    func waitUntilRunning(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch state {
+            case .running: return true
+            case .crashed, .stopped: return false
+            case .starting: break
+            }
+            try? await Task.sleep(for: .seconds(1))
+        }
+        return false
+    }
+
+    var isRunningOrStarting: Bool {
+        switch state {
+        case .running, .starting: return true
+        default: return false
+        }
+    }
+
+    func log(_ line: String) { appendLog(line) }
 
     func restart() {
         stop()
