@@ -26,6 +26,7 @@
 //  window) is not caught here.
 //
 
+import Combine
 import CryptoKit
 import Foundation
 
