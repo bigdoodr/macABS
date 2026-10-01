@@ -11,6 +11,17 @@ A native macOS menu bar app that runs [Audiobookshelf](https://github.com/advply
 - Optional "Launch at Login"
 - Self-contained: the `.app` bundles its own Node runtime and Audiobookshelf build, so there's nothing to install separately
 
+## Automatic Audiobookshelf updates
+
+macABS updates the Audiobookshelf server itself, without a new macABS release:
+
+- A scheduled workflow (`.github/workflows/abs-payload.yml`) watches upstream Audiobookshelf releases. For each new one it builds an Apple Silicon payload (the release's own Node runtime, server, web client, ffmpeg), launch-tests it, and publishes it here as an `abs-vX.Y.Z` release. Scheduled builds wait 24 hours after the upstream release (`MIN_AGE_HOURS`) so day-zero regressions don't reach everyone.
+- The app checks those releases shortly after launch and every 6 hours, downloads a newer payload, verifies its SHA-256, and switches to it automatically. There is no prompt.
+- Before switching it stops the server and backs up `config/` (the database). If the new version doesn't pass `/healthcheck` and stay running for a further 45 seconds, the app restores the backup, returns to the previous version, and won't retry that release.
+- The payload carries its own Node, so upstream Node upgrades (v2.37 moved to Node 24) also apply without an app update. Payloads are installed under `~/Library/Application Support/<bundle id>/versions/`; the copy inside the app is the fallback.
+
+Menu → "Check for Audiobookshelf Update" runs a check immediately. A new macABS release is only needed for changes to the app itself, or if a payload's manifest `format` changes.
+
 ## Requirements
 
 - macOS 14 or later

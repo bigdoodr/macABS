@@ -20,14 +20,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENDOR_DIR="${SCRIPT_DIR}/Vendor"
+# VENDOR_DIR, NODE_VERSION and ABS_REF can be overridden from the
+# environment: scripts/build-abs-payload.sh (used by the abs-payload
+# workflow to build updates for already-installed apps) sets all three.
+# The defaults below are what gets bundled inside the .app itself.
+VENDOR_DIR="${VENDOR_DIR:-${SCRIPT_DIR}/Vendor}"
 
 # --- Pin these deliberately -- don't float to "latest" ---
-NODE_VERSION="22.23.2"
+# Audiobookshelf v2.37.0 moved to Node 24 (see its Dockerfile); the Node
+# major here must match whatever the pinned ABS_REF's Dockerfile uses.
+NODE_VERSION="${NODE_VERSION:-24.21.0}"
 NODE_ARCH="darwin-arm64"   # Mac mini / Apple Silicon only. Use darwin-x64
                             # for Intel if you ever need to support both.
 ABS_REPO="https://github.com/advplyr/audiobookshelf.git"
-ABS_REF="v2.36.1"           # pin to a tag, not a moving branch
+ABS_REF="${ABS_REF:-v2.37.1}"   # pin to a tag, not a moving branch
 
 # Audiobookshelf's own BinaryManager (server/managers/BinaryManager.js)
 # downloads ffmpeg/ffprobe from ffbinaries.com, but that service only
@@ -113,7 +119,7 @@ vendor_node() {
 # 2. Pre-built Audiobookshelf
 # ---------------------------------------------------------------------------
 vendor_audiobookshelf() {
-    if [ -f "${VENDOR_ABS_DIR}/index.js" ] && [ -d "${VENDOR_ABS_DIR}/node_modules/sequelize" ] \
+    if [ -f "${VENDOR_ABS_DIR}/macabs-payload.json" ] && [ -d "${VENDOR_ABS_DIR}/node_modules/sequelize" ] \
        && [ -f "${VENDOR_ABS_DIR}/client/dist/200.html" ]; then
         log "Audiobookshelf already vendored and built, skipping."
         return
@@ -143,8 +149,26 @@ vendor_audiobookshelf() {
     export PATH="${VENDOR_NODE_DIR}/bin:${PATH}"
     log "Using $(command -v node) ($(node --version)) for the build"
 
+    # Up to v2.36 the server ran straight from source (index.js). From
+    # v2.37 it is TypeScript compiled by `npm run build:server` into
+    # dist-server/, and the entry point becomes dist-server/index.js. tsc
+    # is a devDependency, so those versions need the full install, then a
+    # prune back to production dependencies (native modules such as sqlite3
+    # stay built).
+    local compiled_server=0
+    if grep -q '"build:server"' "${VENDOR_ABS_DIR}/package.json"; then
+        compiled_server=1
+    fi
+
     log "Installing root dependencies (this is the ~100MB+ node_modules)"
-    (cd "${VENDOR_ABS_DIR}" && "${npm_bin}" ci --omit=dev)
+    if [ "${compiled_server}" = 1 ]; then
+        (cd "${VENDOR_ABS_DIR}" && "${npm_bin}" ci)
+        log "Compiling server (npm run build:server)"
+        (cd "${VENDOR_ABS_DIR}" && "${npm_bin}" run build:server)
+        (cd "${VENDOR_ABS_DIR}" && "${npm_bin}" prune --omit=dev)
+    else
+        (cd "${VENDOR_ABS_DIR}" && "${npm_bin}" ci --omit=dev)
+    fi
 
     log "Building client (Nuxt frontend)"
     (cd "${VENDOR_ABS_DIR}/client" && "${npm_bin}" ci && "${npm_bin}" run generate)
@@ -164,7 +188,26 @@ vendor_audiobookshelf() {
     # needs its own full install since Nuxt's build tooling is itself a
     # devDependency of the client subproject.
 
-    log "Audiobookshelf vendored: $(cd "${VENDOR_ABS_DIR}" && "${node_bin}" -e "console.log(require('./package.json').version)")"
+    # Tell the app which file to launch (see ABSRuntime.swift). Also checks
+    # the build actually produced it, so a layout change upstream fails
+    # here instead of at first launch.
+    local entry="index.js"
+    if [ "${compiled_server}" = 1 ]; then
+        entry="dist-server/index.js"
+    fi
+    if [ ! -f "${VENDOR_ABS_DIR}/${entry}" ]; then
+        echo "ERROR: expected server entry point ${entry} was not produced by the build." >&2
+        exit 1
+    fi
+    "${node_bin}" -e '
+        const fs = require("fs");
+        const [dir, entry, ref, nodeVersion] = process.argv.slice(1);
+        fs.writeFileSync(dir + "/macabs-payload.json", JSON.stringify({
+            abs_version: ref, node_version: "v" + nodeVersion, entry: entry
+        }, null, 2) + "\n");
+    ' "${VENDOR_ABS_DIR}" "${entry}" "${ABS_REF}" "${NODE_VERSION}"
+
+    log "Audiobookshelf vendored: $(cd "${VENDOR_ABS_DIR}" && "${node_bin}" -e "console.log(require('./package.json').version)") (entry: ${entry})"
 }
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,115 @@
+name: Audiobookshelf payload
+
+# Builds the downloadable Audiobookshelf update that installed copies of
+# macABS pick up automatically (macABS/ABSUpdater.swift), so a new upstream
+# release reaches users without a macABS app release.
+#
+# Every 6 hours: look up the newest upstream Audiobookshelf release; if this
+# repo has no "abs-<tag>" release for it yet, build the payload
+# (scripts/build-abs-payload.sh), launch-test it, and publish it. A build that
+# fails its launch test is NOT published, so installed apps simply stay on
+# their current version. (The workflow run fails and GitHub emails you.)
+#
+# Run manually from the Actions tab to build a specific tag or to bypass the
+# soak delay below.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      abs_tag:
+        description: "Audiobookshelf tag to build (blank = newest upstream release)"
+        required: false
+        default: ""
+      rebuild:
+        description: "Rebuild and replace the release even if abs-<tag> already exists"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: abs-payload
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: advplyr/audiobookshelf
+  # Scheduled runs wait until an upstream release is this many hours old
+  # before publishing it. Audiobookshelf often ships a hotfix within a day
+  # of a release (2.37.0 -> 2.37.1), and this keeps day-zero regressions
+  # from reaching every install. Manual runs ignore it. Set to 0 to disable.
+  MIN_AGE_HOURS: "24"
+
+jobs:
+  payload:
+    name: Build and publish payload
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decide what to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.abs_tag }}
+          REBUILD: ${{ inputs.rebuild }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          build=false
+
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            # "latest" excludes drafts and prereleases.
+            release="$(gh api "repos/${UPSTREAM}/releases/latest")"
+            tag="$(jq -r .tag_name <<<"$release")"
+            published="$(jq -r .published_at <<<"$release")"
+            age_hours="$(PUB="$published" jq -nr '(now - (env.PUB | fromdateiso8601)) / 3600 | floor')"
+            if [ "$EVENT" = "schedule" ] && [ "$age_hours" -lt "$MIN_AGE_HOURS" ]; then
+              echo "Upstream $tag is ${age_hours}h old (< ${MIN_AGE_HOURS}h soak) -- waiting."
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          release_tag="abs-${tag}"
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            if [ "${REBUILD:-false}" = "true" ]; then
+              build=true
+            else
+              echo "$release_tag already published -- nothing to do."
+            fi
+          else
+            build=true
+          fi
+
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build payload (includes launch test)
+        if: steps.decide.outputs.build == 'true'
+        run: ./scripts/build-abs-payload.sh "${{ steps.decide.outputs.tag }}"
+
+      - name: Publish release
+        if: steps.decide.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.decide.outputs.tag }}
+          RELEASE_TAG: ${{ steps.decide.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          # Replace an existing release when rebuilding.
+          gh release delete "$RELEASE_TAG" --cleanup-tag --yes >/dev/null 2>&1 || true
+
+          node_version="$(jq -r .node_version payload-out/manifest.json)"
+          gh release create "$RELEASE_TAG" payload-out/* \
+            --target "$GITHUB_SHA" \
+            --title "Audiobookshelf ${TAG} payload" \
+            --notes "Auto-built Audiobookshelf ${TAG} (Node ${node_version}, Apple Silicon) for macABS's in-app updater. Not an app download -- see the macABS releases for that. Upstream notes: https://github.com/${UPSTREAM}/releases/tag/${TAG}" \
+            --latest=false

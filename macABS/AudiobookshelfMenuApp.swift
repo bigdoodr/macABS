@@ -22,10 +22,16 @@ struct AudiobookshelfMenuApp: App {
     // Owns the server process for the lifetime of the app. @StateObject
     // (not @ObservedObject) so it's created exactly once here at the root.
     @StateObject private var serverManager: ServerProcessManager
+    // Checks for newer Audiobookshelf payloads and applies them
+    // automatically (see ABSUpdater.swift).
+    @StateObject private var updater: ABSUpdater
 
     init() {
         let manager = ServerProcessManager()
         _serverManager = StateObject(wrappedValue: manager)
+        let updater = ABSUpdater(server: manager)
+        _updater = StateObject(wrappedValue: updater)
+        updater.startAutomaticChecks()
         // "Start Server Automatically" preference -- fire this once at
         // launch, before the menu is ever opened, rather than from
         // MenuContentView (which can be recreated each time the menu
@@ -39,6 +45,7 @@ struct AudiobookshelfMenuApp: App {
         MenuBarExtra {
             MenuContentView()
                 .environmentObject(serverManager)
+                .environmentObject(updater)
         } label: {
             // The menu bar icon itself. Swap for a custom asset later;
             // SF Symbols work fine as a placeholder and adapt to
