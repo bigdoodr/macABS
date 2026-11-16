@@ -50,6 +50,17 @@ enum ServerState {
         }
     }
 
+    /// Symbol for the menu bar icon itself, so the server's state is visible
+    /// without opening the menu.
+    var menuBarSymbolName: String {
+        switch self {
+        case .stopped: return "pause.circle"
+        case .starting: return "arrow.triangle.2.circlepath"
+        case .running: return "headphones"
+        case .crashed: return "exclamationmark.triangle.fill"
+        }
+    }
+
     var label: String {
         switch self {
         case .stopped: return "Stopped"
@@ -149,6 +160,9 @@ final class ServerProcessManager: ObservableObject {
         // etc. are intact) and layer ABS-specific config on top.
         var env = ProcessInfo.processInfo.environment
         env["PORT"] = String(serverPort)
+        // Audiobookshelf shows this as the install type in its web UI
+        // footer and defaults to "debian", which is misleading here.
+        env["SOURCE"] = "macABS"
         env["CONFIG_PATH"] = configPath
         env["METADATA_PATH"] = metadataPath
         // Point Audiobookshelf directly at the vendored arm64 ffmpeg/ffprobe

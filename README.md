@@ -8,8 +8,18 @@ A native macOS menu bar app that runs [Audiobookshelf](https://github.com/advply
 
 - Adds a menu bar icon with Start / Stop / Restart controls for the Audiobookshelf server
 - Runs entirely locally — server config and metadata live in `~/Library/Application Support`, your library files stay wherever you point Audiobookshelf's web UI at them
-- Optional "Launch at Login"
+- Optional "Open macABS at Login" and "Start Audiobookshelf Automatically" (see below)
+- The menu bar icon shows the server state: headphones = running, pause = stopped, arrows = starting, warning triangle = crashed
 - Self-contained: the `.app` bundles its own Node runtime and Audiobookshelf build, so there's nothing to install separately
+
+## The two startup toggles
+
+| Open macABS at Login | Start Audiobookshelf Automatically | What happens |
+|---|---|---|
+| on | on | You log in, macABS appears, the server starts by itself. The "always running" setup most people want. |
+| on | off | The icon is always in your menu bar, but the server stays stopped until you click Start. |
+| off | on | Nothing at login. As soon as you open macABS yourself, the server starts. |
+| off | off | Everything is manual. |
 
 ## Automatic Audiobookshelf updates
 

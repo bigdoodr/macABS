@@ -47,10 +47,11 @@ struct AudiobookshelfMenuApp: App {
                 .environmentObject(serverManager)
                 .environmentObject(updater)
         } label: {
-            // The menu bar icon itself. Swap for a custom asset later;
-            // SF Symbols work fine as a placeholder and adapt to
+            // The menu bar icon itself. It changes with the server state
+            // (running / starting / stopped / crashed) so a problem is
+            // visible without opening the menu. SF Symbols adapt to
             // light/dark menu bar automatically.
-            Image(systemName: "headphones.dots")
+            Image(systemName: serverManager.state.menuBarSymbolName)
         }
         .menuBarExtraStyle(.window) // gives a proper SwiftUI view, not a plain menu
     }
