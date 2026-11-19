@@ -32,6 +32,10 @@ macABS updates the Audiobookshelf server itself, without a new macABS release:
 
 Menu → "Check for Audiobookshelf Update" runs a check immediately. A new macABS release is only needed for changes to the app itself, or if a payload's manifest `format` changes.
 
+## Releasing (maintainers)
+
+Merging a pull request into `main` publishes a new signed, notarized app release **only if the PR has a label**: `release:patch`, `release:minor` or `release:major` (`.github/workflows/auto-release.yml`). Without a label nothing is released. To keep an issue open until the release ships, name it in the PR body on a line such as `Ships: #5, #6` — after the release succeeds those issues get a "Shipped in vX.Y.Z" comment and are closed. Pushing a `vX.Y.Z` tag by hand still works too.
+
 ## Requirements
 
 - macOS 14 or later

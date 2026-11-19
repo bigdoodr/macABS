@@ -1,19 +1,30 @@
 name: Release
 
-# Push a tag like "v1.3.0" to trigger a full build -> smoke test -> sign ->
-# notarize -> publish run. Can also be re-run manually from the Actions tab
-# against an existing tag (e.g. to retry after a transient notarization
-# failure -- delete the GitHub release first if you need a clean redo).
+# Full build -> smoke test -> sign -> notarize -> publish run. Three ways in:
+#   1. Push a tag like "v1.3.0".
+#   2. Run manually from the Actions tab, choosing an existing tag in "Use
+#      workflow from" (e.g. to retry after a transient notarization failure --
+#      delete the GitHub release first if you need a clean redo).
+#   3. Called by auto-release.yml with a tag that does NOT exist yet: the tag
+#      is created by "gh release create" only after everything succeeded, so
+#      a failed build leaves no tag behind.
 on:
   push:
     tags:
       - "v*.*.*"
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to create, e.g. v1.4.0"
+        type: string
+        required: true
 
 permissions:
   contents: write
 
 env:
+  TAG: ${{ inputs.tag || github.ref_name }}
   DEVELOPMENT_TEAM: C7ZFPH2CB5
   SCHEME: macABS
   PROJECT: macABS.xcodeproj
@@ -73,7 +84,7 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "build_number=$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
 
@@ -161,7 +172,8 @@ jobs:
         run: |
           # Only app tags (vX.Y.Z). The "abs-vX.Y.Z" tags created by the
           # abs-payload workflow must not count as the "previous release".
-          prev="$(git tag --list 'v[0-9]*' --sort=-creatordate | sed -n '2p')"
+          # (The current tag may not exist yet, so exclude it by name.)
+          prev="$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -vxF "$TAG" | head -1 || true)"
           echo "tag=$prev" >> "$GITHUB_OUTPUT"
 
       # anthropics/claude-code-action refuses to run on a plain "push"
@@ -172,13 +184,13 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-          CUR_TAG: ${{ github.ref_name }}
+          CUR_TAG: ${{ env.TAG }}
         run: |
           set -euo pipefail
           if [ -n "$PREV_TAG" ]; then
-            range="$PREV_TAG..$CUR_TAG"
+            range="$PREV_TAG..HEAD"
           else
-            range="$CUR_TAG"
+            range="HEAD"
           fi
           log="$(git log "$range" --no-merges)"
           diffstat="$(git diff "$range" --stat)"
@@ -215,7 +227,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" \
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
             "dist/macABS-${{ steps.version.outputs.version }}.zip" \
             --title "macABS ${{ steps.version.outputs.version }}" \
             --notes-file RELEASE_NOTES.md

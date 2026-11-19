@@ -1,0 +1,124 @@
+name: Auto release
+
+# Releases the app when a pull request carrying a release label is merged
+# into main. No label, no release, so README / CI / payload-script PRs never
+# publish a notarized build by accident.
+#
+#   release:patch   v1.4.0 -> v1.4.1
+#   release:minor   v1.4.0 -> v1.5.0
+#   release:major   v1.4.0 -> v2.0.0
+#
+# If a PR has several, the largest bump wins. After the release succeeds,
+# issues the PR body names on a line starting with Fixes / Closes / Resolves /
+# Refs / Ships (e.g. "Ships: #5, #6") get a "Shipped in vX.Y.Z" comment and are
+# closed. Use "Ships" or "Refs" (not "Fixes") if you want an issue to stay open
+# until the release rather than closing at merge.
+#
+# Runs on push to main (merged code only), never on pull_request events, so
+# the signing secrets are never exposed to PRs from forks.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  plan:
+    name: Decide whether to release
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      pr: ${{ steps.plan.outputs.pr }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags, for the next-version calculation
+
+      - name: Find the merged PR and its release label
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "release=false" >> "$GITHUB_OUTPUT"
+
+          pr="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/pulls" --jq '[.[] | select(.merged_at != null)][0].number // empty')"
+          if [ -z "$pr" ]; then
+            echo "No merged PR for ${SHA} (direct push?) -- not releasing."
+            exit 0
+          fi
+
+          labels="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" --jq '[.labels[].name] | join(" ")')"
+          bump=""
+          case " $labels " in *" release:major "*) bump=major ;; esac
+          [ -z "$bump" ] && case " $labels " in *" release:minor "*) bump=minor ;; esac
+          [ -z "$bump" ] && case " $labels " in *" release:patch "*) bump=patch ;; esac
+          if [ -z "$bump" ]; then
+            echo "PR #${pr} has no release:* label -- not releasing."
+            exit 0
+          fi
+
+          tag="$(./scripts/next-version.sh "$bump")"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists -- not releasing." >&2
+            exit 1
+          fi
+
+          echo "PR #${pr} (${bump}) -> ${tag}"
+          {
+            echo "release=true"
+            echo "tag=${tag}"
+            echo "pr=${pr}"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Build and publish ${{ needs.plan.outputs.tag }}
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+    secrets: inherit
+    permissions:
+      contents: write
+
+  follow-up:
+    name: Comment on and close shipped issues
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.plan.outputs.pr }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          body="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" --jq .body)"
+          issues="$(printf '%s\n' "$body" \
+            | grep -iE '^[[:space:]]*(fixes|closes|resolves|refs|ships)\b' \
+            | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true)"
+
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+          for n in $issues; do
+            # Skip pull requests that happen to be referenced.
+            if [ "$(gh api "repos/${GITHUB_REPOSITORY}/issues/${n}" --jq '.pull_request != null')" = "true" ]; then
+              continue
+            fi
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${n}/comments" \
+              -f body="Shipped in [macABS ${TAG}](${url}) (via #${PR}). Thanks for the report!" >/dev/null
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/${n}" \
+              -f state=closed -f state_reason=completed >/dev/null
+            echo "Closed #${n}"
+          done
