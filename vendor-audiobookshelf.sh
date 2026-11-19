@@ -33,7 +33,7 @@ NODE_VERSION="${NODE_VERSION:-24.21.0}"
 NODE_ARCH="darwin-arm64"   # Mac mini / Apple Silicon only. Use darwin-x64
                             # for Intel if you ever need to support both.
 ABS_REPO="https://github.com/advplyr/audiobookshelf.git"
-ABS_REF="${ABS_REF:-v2.37.1}"   # pin to a tag, not a moving branch
+ABS_REF="${ABS_REF:-v2.38.0}"   # pin to a tag, not a moving branch
 
 # Audiobookshelf's own BinaryManager (server/managers/BinaryManager.js)
 # downloads ffmpeg/ffprobe from ffbinaries.com, but that service only
