@@ -8,8 +8,18 @@ A native macOS menu bar app that runs [Audiobookshelf](https://github.com/advply
 
 - Adds a menu bar icon with Start / Stop / Restart controls for the Audiobookshelf server
 - Runs entirely locally — server config and metadata live in `~/Library/Application Support`, your library files stay wherever you point Audiobookshelf's web UI at them
-- Optional "Launch at Login"
+- Optional "Open macABS at Login" and "Start Audiobookshelf Automatically" (see below)
+- The menu bar icon shows the server state: headphones = running, pause = stopped, arrows = starting, warning triangle = crashed
 - Self-contained: the `.app` bundles its own Node runtime and Audiobookshelf build, so there's nothing to install separately
+
+## The two startup toggles
+
+| Open macABS at Login | Start Audiobookshelf Automatically | What happens |
+|---|---|---|
+| on | on | You log in, macABS appears, the server starts by itself. The "always running" setup most people want. |
+| on | off | The icon is always in your menu bar, but the server stays stopped until you click Start. |
+| off | on | Nothing at login. As soon as you open macABS yourself, the server starts. |
+| off | off | Everything is manual. |
 
 ## Automatic Audiobookshelf updates
 
@@ -21,6 +31,10 @@ macABS updates the Audiobookshelf server itself, without a new macABS release:
 - The payload carries its own Node, so upstream Node upgrades (v2.37 moved to Node 24) also apply without an app update. Payloads are installed under `~/Library/Application Support/<bundle id>/versions/`; the copy inside the app is the fallback.
 
 Menu → "Check for Audiobookshelf Update" runs a check immediately. A new macABS release is only needed for changes to the app itself, or if a payload's manifest `format` changes.
+
+## Releasing (maintainers)
+
+Merging a pull request into `main` publishes a new signed, notarized app release **only if the PR has a label**: `release:patch`, `release:minor` or `release:major` (`.github/workflows/auto-release.yml`). Without a label nothing is released. To keep an issue open until the release ships, name it in the PR body on a line such as `Ships: #5, #6` — after the release succeeds those issues get a "Shipped in vX.Y.Z" comment and are closed. Pushing a `vX.Y.Z` tag by hand still works too.
 
 ## Requirements
 

@@ -38,8 +38,14 @@ struct MenuContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("Audiobookshelf \(serverManager.activeVersion)")
-                    .font(.caption)
+                HStack(spacing: 4) {
+                    Text("Audiobookshelf \(serverManager.activeVersion)")
+                        .font(.caption)
+                    if let notes = releaseNotesURL {
+                        Link("What's new", destination: notes)
+                            .font(.caption)
+                    }
+                }
                 if !updater.statusLine.isEmpty {
                     Text(updater.statusLine)
                         .font(.caption2)
@@ -62,18 +68,24 @@ struct MenuContentView: View {
                 showingLogs = true
             }
 
-            Toggle("Open at Login", isOn: Binding(
+            Toggle("Open macABS at Login", isOn: Binding(
                 get: { serverManager.launchAtLoginEnabled },
                 set: { serverManager.setLaunchAtLogin($0) }
             ))
 
-            Toggle("Start Server Automatically", isOn: $serverManager.startServerAutomatically)
+            Toggle("Start Audiobookshelf Automatically", isOn: $serverManager.startServerAutomatically)
 
             Divider()
 
-            Button("Quit") {
-                serverManager.stop()
-                NSApplication.shared.terminate(nil)
+            HStack {
+                Button("Quit") {
+                    serverManager.stop()
+                    NSApplication.shared.terminate(nil)
+                }
+                Spacer()
+                Text("macABS \(appVersion)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding()
@@ -81,6 +93,16 @@ struct MenuContentView: View {
         .sheet(isPresented: $showingLogs) {
             LogWindow(lines: serverManager.logLines)
         }
+    }
+
+    /// macABS's own version (the Audiobookshelf version is shown separately).
+    private var appVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+    }
+
+    /// Upstream release notes for the Audiobookshelf version in use.
+    private var releaseNotesURL: URL? {
+        URL(string: "https://github.com/advplyr/audiobookshelf/releases/tag/\(serverManager.activeVersion)")
     }
 
     private var isRunning: Bool {
