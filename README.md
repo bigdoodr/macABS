@@ -10,6 +10,7 @@ A native macOS menu bar app that runs [Audiobookshelf](https://github.com/advply
 - Runs entirely locally — server config and metadata live in `~/Library/Application Support`, your library files stay wherever you point Audiobookshelf's web UI at them
 - Optional "Open macABS at Login" and "Start Audiobookshelf Automatically" (see below)
 - Restarts the server automatically after an unexpected crash (2, 4, 8, 16, 32 seconds, then stops and waits for you; Stop and Quit always win)
+- The server port (default 13378) can be changed from the menu; macABS checks that the port is free and offers to restart
 - On the very first start, opens the web UI so you land in Audiobookshelf's setup wizard
 - "View Logs…" opens a normal window; "Show Data Folder in Finder" opens the folder holding the database, metadata and backups
 - The menu bar icon shows the server state: headphones = running, pause = stopped, arrows = starting, warning triangle = crashed

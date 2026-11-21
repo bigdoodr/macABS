@@ -111,7 +111,22 @@ final class ServerProcessManager: ObservableObject {
     /// PORT explicitly below keeps it consistent with the port used
     /// elsewhere (e.g. if you later put this behind the same cloudflared
     /// tunnel pattern as the podcast feed).
-    private let serverPort = 13378
+    static let defaultPort = 13378
+    private static let serverPortKey = "serverPort"
+    private static let validPorts = 1024...65535 // below 1024 needs root
+
+    /// The port the server will use on its next start. Persisted; an
+    /// out-of-range stored value falls back to the default.
+    @Published private(set) var serverPort: Int = ServerProcessManager.storedPort()
+    /// The port the live process was actually launched with (nil when it
+    /// isn't running). Health checks and the web UI URL follow this, so a
+    /// port change that's waiting for a restart doesn't break them.
+    @Published private(set) var runningPort: Int?
+
+    private nonisolated static func storedPort() -> Int {
+        let value = UserDefaults.standard.integer(forKey: serverPortKey)
+        return validPorts.contains(value) ? value : defaultPort
+    }
     /// CONFIG_PATH/METADATA_PATH: the app's own database/settings, not
     /// your audiobook library locations (those are configured inside
     /// Audiobookshelf's own web UI, unrelated to this). Application
@@ -131,9 +146,9 @@ final class ServerProcessManager: ObservableObject {
 
     /// The Audiobookshelf web UI. Single source of truth for the menu's
     /// "Open Web UI" button and the first-run auto-open.
-    var webUIURL: URL { URL(string: "http://localhost:\(serverPort)")! }
+    var webUIURL: URL { URL(string: "http://localhost:\(runningPort ?? serverPort)")! }
 
-    private var healthCheckURL: URL { URL(string: "http://localhost:\(serverPort)/healthcheck")! }
+    private var healthCheckURL: URL { URL(string: "http://localhost:\(runningPort ?? serverPort)/healthcheck")! }
     // ----------------------------------------
 
     private var process: Process?
@@ -163,6 +178,13 @@ final class ServerProcessManager: ObservableObject {
 
     func start(isAutoRetry: Bool = false) {
         guard process == nil else { return }
+        // Fail fast with a readable message instead of a Node EADDRINUSE
+        // buried in the log.
+        guard Self.isPortFree(serverPort) else {
+            state = .crashed("port \(serverPort) in use")
+            appendLog("Port \(serverPort) is already in use by another program. Pick a different port in the menu, or quit the other program and Start again.")
+            return
+        }
         crashRetryTask?.cancel()
         crashRetryTask = nil
         if !isAutoRetry { crashRetryCount = 0 }
@@ -184,6 +206,7 @@ final class ServerProcessManager: ObservableObject {
         // etc. are intact) and layer ABS-specific config on top.
         var env = ProcessInfo.processInfo.environment
         env["PORT"] = String(serverPort)
+        runningPort = serverPort
         // Audiobookshelf shows this as the install type in its web UI
         // footer and defaults to "debian", which is misleading here.
         env["SOURCE"] = "macABS"
@@ -217,6 +240,7 @@ final class ServerProcessManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.process = nil
+                self.runningPort = nil
                 self.healthCheckTask?.cancel()
                 if self.isIntentionalStop {
                     self.state = .stopped
@@ -238,6 +262,7 @@ final class ServerProcessManager: ObservableObject {
             process = task
             beginHealthChecking()
         } catch {
+            runningPort = nil
             state = .crashed(error.localizedDescription)
             appendLog("Failed to launch: \(error.localizedDescription)")
         }
@@ -303,6 +328,53 @@ final class ServerProcessManager: ObservableObject {
             try? await Task.sleep(for: .seconds(1))
             start()
         }
+    }
+
+    // MARK: - Port
+
+    enum PortChangeResult: Equatable {
+        case applied          // saved; nothing to restart
+        case needsRestart     // saved; the running server is on the old port
+        case unchanged
+        case invalid
+        case inUse(Int)
+    }
+
+    /// Validates, probes for conflicts, persists, and says whether a restart
+    /// is needed to take effect.
+    func setPort(_ port: Int) -> PortChangeResult {
+        guard Self.validPorts.contains(port) else { return .invalid }
+        guard port != serverPort else { return .unchanged }
+        // Our own running server legitimately holds its port.
+        if port != runningPort, !Self.isPortFree(port) { return .inUse(port) }
+        UserDefaults.standard.set(port, forKey: Self.serverPortKey)
+        serverPort = port
+        if let running = runningPort, running != port { return .needsRestart }
+        return .applied
+    }
+
+    /// True unless something already listens on the port. Binds the IPv4
+    /// wildcard address like Node does, with SO_REUSEADDR so leftover
+    /// TIME_WAIT sockets after a quick restart don't read as "in use". Only
+    /// EADDRINUSE counts as a conflict; any other failure is inconclusive
+    /// and never blocks the user.
+    private nonisolated static func isPortFree(_ port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return true }
+        defer { Darwin.close(fd) }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(UInt16(port).bigEndian)
+        address.sin_addr = in_addr(s_addr: INADDR_ANY.bigEndian)
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0 || errno != EADDRINUSE
     }
 
     // MARK: - Crash recovery
