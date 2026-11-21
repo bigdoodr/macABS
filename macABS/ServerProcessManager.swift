@@ -31,6 +31,7 @@
 //  signed app bundle's Resources are expected to stay read-only.
 //
 
+import AppKit
 import Combine
 import Foundation
 import ServiceManagement
@@ -110,7 +111,22 @@ final class ServerProcessManager: ObservableObject {
     /// PORT explicitly below keeps it consistent with the port used
     /// elsewhere (e.g. if you later put this behind the same cloudflared
     /// tunnel pattern as the podcast feed).
-    private let serverPort = 13378
+    nonisolated static let defaultPort = 13378
+    private nonisolated static let serverPortKey = "serverPort"
+    private nonisolated static let validPorts = 1024...65535 // below 1024 needs root
+
+    /// The port the server will use on its next start. Persisted; an
+    /// out-of-range stored value falls back to the default.
+    @Published private(set) var serverPort: Int = ServerProcessManager.storedPort()
+    /// The port the live process was actually launched with (nil when it
+    /// isn't running). Health checks and the web UI URL follow this, so a
+    /// port change that's waiting for a restart doesn't break them.
+    @Published private(set) var runningPort: Int?
+
+    private nonisolated static func storedPort() -> Int {
+        let value = UserDefaults.standard.integer(forKey: serverPortKey)
+        return validPorts.contains(value) ? value : defaultPort
+    }
     /// CONFIG_PATH/METADATA_PATH: the app's own database/settings, not
     /// your audiobook library locations (those are configured inside
     /// Audiobookshelf's own web UI, unrelated to this). Application
@@ -128,10 +144,29 @@ final class ServerProcessManager: ObservableObject {
         return dir.path
     }
 
-    private var healthCheckURL: URL { URL(string: "http://localhost:\(serverPort)/healthcheck")! }
+    /// The Audiobookshelf web UI. Single source of truth for the menu's
+    /// "Open Web UI" button and the first-run auto-open.
+    var webUIURL: URL { URL(string: "http://localhost:\(runningPort ?? serverPort)")! }
+
+    private var healthCheckURL: URL { URL(string: "http://localhost:\(runningPort ?? serverPort)/healthcheck")! }
     // ----------------------------------------
 
     private var process: Process?
+
+    // --- Automatic crash recovery ---
+    /// Restart budget. Reset by a passing health check (a server that
+    /// answered HTTP has proven it can run) or by a manual Start.
+    private var crashRetryCount = 0
+    private let maxCrashRetries = 5
+    private var crashRetryTask: Task<Void, Never>?
+    /// The updater sets this while it swaps versions so a crash during its
+    /// own verification window is handled by its rollback, not by a retry.
+    var suppressAutoRestart = false
+
+    /// True when this launch is the first one (no database exists yet), so
+    /// the web UI should open once the server is up and the user lands in
+    /// Audiobookshelf's setup wizard.
+    private var openWebUIWhenRunning = false
     private var healthCheckTask: Task<Void, Never>?
     private let maxLogLines = 500
     /// Set right before we call process?.terminate() so the termination
@@ -141,8 +176,19 @@ final class ServerProcessManager: ObservableObject {
     /// the raw exit code.
     private var isIntentionalStop = false
 
-    func start() {
+    func start(isAutoRetry: Bool = false) {
         guard process == nil else { return }
+        // Fail fast with a readable message instead of a Node EADDRINUSE
+        // buried in the log.
+        guard Self.isPortFree(serverPort) else {
+            state = .crashed("port \(serverPort) in use")
+            appendLog("Port \(serverPort) is already in use by another program. Pick a different port in the menu, or quit the other program and Start again.")
+            return
+        }
+        crashRetryTask?.cancel()
+        crashRetryTask = nil
+        if !isAutoRetry { crashRetryCount = 0 }
+        if !isAutoRetry { openWebUIWhenRunning = !hasExistingDatabase }
         isIntentionalStop = false
         state = .starting
         appendLog("Starting server…")
@@ -160,6 +206,7 @@ final class ServerProcessManager: ObservableObject {
         // etc. are intact) and layer ABS-specific config on top.
         var env = ProcessInfo.processInfo.environment
         env["PORT"] = String(serverPort)
+        runningPort = serverPort
         // Audiobookshelf shows this as the install type in its web UI
         // footer and defaults to "debian", which is misleading here.
         env["SOURCE"] = "macABS"
@@ -193,6 +240,7 @@ final class ServerProcessManager: ObservableObject {
             guard let self else { return }
             Task { @MainActor in
                 self.process = nil
+                self.runningPort = nil
                 self.healthCheckTask?.cancel()
                 if self.isIntentionalStop {
                     self.state = .stopped
@@ -200,6 +248,7 @@ final class ServerProcessManager: ObservableObject {
                 } else if proc.terminationStatus != 0 {
                     self.state = .crashed("exit code \(proc.terminationStatus)")
                     self.appendLog("Server exited with code \(proc.terminationStatus)")
+                    self.scheduleCrashRetry()
                 } else {
                     self.state = .stopped
                     self.appendLog("Server stopped cleanly.")
@@ -213,12 +262,15 @@ final class ServerProcessManager: ObservableObject {
             process = task
             beginHealthChecking()
         } catch {
+            runningPort = nil
             state = .crashed(error.localizedDescription)
             appendLog("Failed to launch: \(error.localizedDescription)")
         }
     }
 
     func stop() {
+        crashRetryTask?.cancel()
+        crashRetryTask = nil
         isIntentionalStop = true
         healthCheckTask?.cancel()
         process?.terminate()
@@ -278,6 +330,84 @@ final class ServerProcessManager: ObservableObject {
         }
     }
 
+    // MARK: - Port
+
+    enum PortChangeResult: Equatable {
+        case applied          // saved; nothing to restart
+        case needsRestart     // saved; the running server is on the old port
+        case unchanged
+        case invalid
+        case inUse(Int)
+    }
+
+    /// Validates, probes for conflicts, persists, and says whether a restart
+    /// is needed to take effect.
+    func setPort(_ port: Int) -> PortChangeResult {
+        guard Self.validPorts.contains(port) else { return .invalid }
+        guard port != serverPort else { return .unchanged }
+        // Our own running server legitimately holds its port.
+        if port != runningPort, !Self.isPortFree(port) { return .inUse(port) }
+        UserDefaults.standard.set(port, forKey: Self.serverPortKey)
+        serverPort = port
+        if let running = runningPort, running != port { return .needsRestart }
+        return .applied
+    }
+
+    /// True unless something already listens on the port. Binds the IPv4
+    /// wildcard address like Node does, with SO_REUSEADDR so leftover
+    /// TIME_WAIT sockets after a quick restart don't read as "in use". Only
+    /// EADDRINUSE counts as a conflict; any other failure is inconclusive
+    /// and never blocks the user.
+    private nonisolated static func isPortFree(_ port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return true }
+        defer { Darwin.close(fd) }
+        var yes: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(UInt16(port).bigEndian)
+        address.sin_addr = in_addr(s_addr: INADDR_ANY.bigEndian)
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0 || errno != EADDRINUSE
+    }
+
+    // MARK: - Crash recovery
+
+    /// Retries after an unexpected non-zero exit: 2 s, 4 s, 8 s, 16 s, 32 s,
+    /// then gives up (a human is needed). Stop / Quit / a manual Start cancel
+    /// a pending retry, and every retry goes through the normal start() path.
+    private func scheduleCrashRetry() {
+        guard !suppressAutoRestart else { return }
+        guard crashRetryCount < maxCrashRetries else {
+            appendLog("Not auto-restarting after \(maxCrashRetries) attempts -- check the log, fix the cause, and start manually.")
+            return
+        }
+        crashRetryCount += 1
+        let delay = min(1 << crashRetryCount, 60)
+        appendLog("Auto-restarting in \(delay)s (attempt \(crashRetryCount)/\(maxCrashRetries))…")
+        crashRetryTask?.cancel()
+        crashRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.start(isAutoRetry: true)
+        }
+    }
+
+    // MARK: - First run
+
+    /// Audiobookshelf creates its SQLite database on first start, so no
+    /// *.sqlite file in config/ means nothing has been set up yet.
+    private var hasExistingDatabase: Bool {
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: configPath)) ?? []
+        return files.contains { $0.hasSuffix(".sqlite") }
+    }
+
     // MARK: - Login item
 
     /// Registers/unregisters the app as a login item via SMAppService.
@@ -321,7 +451,12 @@ final class ServerProcessManager: ObservableObject {
             if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
                 if case .running = state { /* already running, no-op */ } else {
                     state = .running
+                    crashRetryCount = 0
                     appendLog("Health check passed -- server is up.")
+                    if openWebUIWhenRunning {
+                        openWebUIWhenRunning = false
+                        NSWorkspace.shared.open(webUIURL)
+                    }
                 }
             }
         } catch {

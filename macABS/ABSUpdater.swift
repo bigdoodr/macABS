@@ -235,6 +235,10 @@ final class ABSUpdater: ObservableObject {
 
         // 3. Stop the server and back up its database.
         phase = .verifying(version)
+        // Crash handling during the swap belongs to the rollback below, not
+        // to the server's own auto-restart.
+        server.suppressAutoRestart = true
+        defer { server.suppressAutoRestart = false }
         record("Restarting on Audiobookshelf \(version)…", persist: false)
         await server.stopAndWait()
 

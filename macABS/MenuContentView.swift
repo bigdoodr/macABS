@@ -12,11 +12,7 @@ import SwiftUI
 struct MenuContentView: View {
     @EnvironmentObject private var serverManager: ServerProcessManager
     @EnvironmentObject private var updater: ABSUpdater
-    @State private var showingLogs = false
-
-    // Matches ServerProcessManager.serverPort (13378) -- keep these in
-    // sync if you change the port there.
-    private let webUIURL = URL(string: "http://localhost:13378")!
+    @State private var portText = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -60,12 +56,36 @@ struct MenuContentView: View {
             .disabled(updater.isBusy)
 
             Button("Open Web UI") {
-                NSWorkspace.shared.open(webUIURL)
+                NSWorkspace.shared.open(serverManager.webUIURL)
             }
             .disabled(!isRunning)
 
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Port")
+                    TextField("", text: $portText, prompt: Text(verbatim: String(serverManager.serverPort)))
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 70)
+                        .onChange(of: portText) { _, newValue in
+                            let digits = String(newValue.filter(\.isNumber).prefix(5))
+                            if digits != newValue { portText = digits }
+                        }
+                        .onSubmit(commitPort)
+                    Spacer()
+                }
+                if let running = serverManager.runningPort, running != serverManager.serverPort {
+                    Text("Running on \(String(running)) until restart")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Button("View Logs…") {
-                showingLogs = true
+                LogWindowController.shared.show(server: serverManager)
+            }
+
+            Button("Show Data Folder in Finder") {
+                NSWorkspace.shared.open(ABSRuntime.supportDirectory)
             }
 
             Toggle("Open macABS at Login", isOn: Binding(
@@ -73,7 +93,7 @@ struct MenuContentView: View {
                 set: { serverManager.setLaunchAtLogin($0) }
             ))
 
-            Toggle("Start Audiobookshelf Automatically", isOn: $serverManager.startServerAutomatically)
+            Toggle("Auto-start Audiobookshelf", isOn: $serverManager.startServerAutomatically)
 
             Divider()
 
@@ -90,9 +110,38 @@ struct MenuContentView: View {
         }
         .padding()
         .frame(width: 260)
-        .sheet(isPresented: $showingLogs) {
-            LogWindow(lines: serverManager.logLines)
+    }
+
+    /// Return in the port field. Empty resets to the default port.
+    private func commitPort() {
+        let trimmed = portText.trimmingCharacters(in: .whitespaces)
+        let port = trimmed.isEmpty ? ServerProcessManager.defaultPort : Int(trimmed)
+        portText = ""
+        guard let port else { return }
+        switch serverManager.setPort(port) {
+        case .unchanged, .applied:
+            break
+        case .invalid:
+            showAlert("Invalid port", "Use a number from 1024 to 65535.")
+        case .inUse(let used):
+            showAlert("Port \(used) is in use", "Another program is already listening on that port. Choose a different one.")
+        case .needsRestart:
+            if showAlert("Port changed", "Audiobookshelf has to restart to use port \(serverManager.serverPort).",
+                         buttons: ["Restart Now", "Later"]) == .alertFirstButtonReturn {
+                serverManager.restart()
+            }
         }
+    }
+
+    @discardableResult
+    private func showAlert(_ title: String, _ message: String, buttons: [String] = ["OK"]) -> NSApplication.ModalResponse {
+        // The app is a menu bar agent; come forward so the alert isn't hidden.
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        buttons.forEach { alert.addButton(withTitle: $0) }
+        return alert.runModal()
     }
 
     /// macABS's own version (the Audiobookshelf version is shown separately).
@@ -115,28 +164,5 @@ struct MenuContentView: View {
         case .running, .starting: return true
         default: return false
         }
-    }
-}
-
-struct LogWindow: View {
-    let lines: [String]
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading) {
-            Text("Server Log").font(.headline).padding(.bottom, 4)
-            ScrollView {
-                Text(lines.joined(separator: "\n"))
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Spacer()
-                Button("Close") { dismiss() }
-            }
-        }
-        .padding()
-        .frame(width: 500, height: 400)
     }
 }
