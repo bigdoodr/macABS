@@ -93,7 +93,7 @@ struct MenuContentView: View {
                 set: { serverManager.setLaunchAtLogin($0) }
             ))
 
-            Toggle("Start Audiobookshelf Automatically", isOn: $serverManager.startServerAutomatically)
+            Toggle("Auto-start Audiobookshelf", isOn: $serverManager.startServerAutomatically)
 
             Divider()
 
