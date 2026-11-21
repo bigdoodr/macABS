@@ -196,13 +196,13 @@ jobs:
           diffstat="$(git diff "$range" --stat)"
 
           jq -n \
-            --arg model "claude-sonnet-5" \
+            --arg model "claude-sonnet-5-5" \
             --arg tag "$CUR_TAG" \
             --arg log "$log" \
             --arg diffstat "$diffstat" \
             '{
               model: $model,
-              max_tokens: 1024,
+              max_tokens: 2048,
               messages: [{
                 role: "user",
                 content: ("Write concise, user-facing release notes in Markdown for macABS " + $tag + ".\n\nWrite for someone deciding whether to update the app, not for a developer reading commit messages -- describe user-visible effect, not implementation. Use headings like \"Fixes\" and \"Changes\" only where relevant, skip empty sections, and do not include a title line.\n\nCommit log:\n" + $log + "\n\nDiffstat:\n" + $diffstat)
@@ -215,12 +215,17 @@ jobs:
             -H "content-type: application/json" \
             -d @/tmp/request.json > /tmp/response.json
 
-          if jq -e '.error' /tmp/response.json >/dev/null 2>&1; then
-            echo "Anthropic API error:" >&2
-            jq . /tmp/response.json >&2
-            exit 1
+          # Take every text block (the first content block is not always
+          # text). If the API errored or returned no text, fall back to the
+          # commit list so a release never ships with empty notes.
+          notes="$(jq -r '[.content[]? | select(.type == "text") | .text] | join("\n")' /tmp/response.json 2>/dev/null || true)"
+          if [ -z "${notes//[[:space:]]/}" ]; then
+            echo "::warning::Release-note generation returned no text; using the commit list instead."
+            jq -c '{type, stop_reason, content_types: [.content[]?.type], error}' /tmp/response.json >&2 || head -c 500 /tmp/response.json >&2
+            { echo "## What's changed"; echo; git log "$range" --no-merges --pretty='- %s'; } > RELEASE_NOTES.md
+          else
+            printf '%s\n' "$notes" > RELEASE_NOTES.md
           fi
-          jq -r '.content[0].text' /tmp/response.json > RELEASE_NOTES.md
           cat RELEASE_NOTES.md
 
       - name: Create GitHub release
