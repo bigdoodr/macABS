@@ -111,9 +111,9 @@ final class ServerProcessManager: ObservableObject {
     /// PORT explicitly below keeps it consistent with the port used
     /// elsewhere (e.g. if you later put this behind the same cloudflared
     /// tunnel pattern as the podcast feed).
-    static let defaultPort = 13378
-    private static let serverPortKey = "serverPort"
-    private static let validPorts = 1024...65535 // below 1024 needs root
+    nonisolated static let defaultPort = 13378
+    private nonisolated static let serverPortKey = "serverPort"
+    private nonisolated static let validPorts = 1024...65535 // below 1024 needs root
 
     /// The port the server will use on its next start. Persisted; an
     /// out-of-range stored value falls back to the default.
