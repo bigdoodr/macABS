@@ -12,11 +12,6 @@ import SwiftUI
 struct MenuContentView: View {
     @EnvironmentObject private var serverManager: ServerProcessManager
     @EnvironmentObject private var updater: ABSUpdater
-    @State private var showingLogs = false
-
-    // Matches ServerProcessManager.serverPort (13378) -- keep these in
-    // sync if you change the port there.
-    private let webUIURL = URL(string: "http://localhost:13378")!
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -60,12 +55,16 @@ struct MenuContentView: View {
             .disabled(updater.isBusy)
 
             Button("Open Web UI") {
-                NSWorkspace.shared.open(webUIURL)
+                NSWorkspace.shared.open(serverManager.webUIURL)
             }
             .disabled(!isRunning)
 
             Button("View Logs…") {
-                showingLogs = true
+                LogWindowController.shared.show(server: serverManager)
+            }
+
+            Button("Show Data Folder in Finder") {
+                NSWorkspace.shared.open(ABSRuntime.supportDirectory)
             }
 
             Toggle("Open macABS at Login", isOn: Binding(
@@ -90,9 +89,6 @@ struct MenuContentView: View {
         }
         .padding()
         .frame(width: 260)
-        .sheet(isPresented: $showingLogs) {
-            LogWindow(lines: serverManager.logLines)
-        }
     }
 
     /// macABS's own version (the Audiobookshelf version is shown separately).
@@ -115,28 +111,5 @@ struct MenuContentView: View {
         case .running, .starting: return true
         default: return false
         }
-    }
-}
-
-struct LogWindow: View {
-    let lines: [String]
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading) {
-            Text("Server Log").font(.headline).padding(.bottom, 4)
-            ScrollView {
-                Text(lines.joined(separator: "\n"))
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Spacer()
-                Button("Close") { dismiss() }
-            }
-        }
-        .padding()
-        .frame(width: 500, height: 400)
     }
 }

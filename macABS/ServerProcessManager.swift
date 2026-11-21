@@ -31,6 +31,7 @@
 //  signed app bundle's Resources are expected to stay read-only.
 //
 
+import AppKit
 import Combine
 import Foundation
 import ServiceManagement
@@ -128,10 +129,29 @@ final class ServerProcessManager: ObservableObject {
         return dir.path
     }
 
+    /// The Audiobookshelf web UI. Single source of truth for the menu's
+    /// "Open Web UI" button and the first-run auto-open.
+    var webUIURL: URL { URL(string: "http://localhost:\(serverPort)")! }
+
     private var healthCheckURL: URL { URL(string: "http://localhost:\(serverPort)/healthcheck")! }
     // ----------------------------------------
 
     private var process: Process?
+
+    // --- Automatic crash recovery ---
+    /// Restart budget. Reset by a passing health check (a server that
+    /// answered HTTP has proven it can run) or by a manual Start.
+    private var crashRetryCount = 0
+    private let maxCrashRetries = 5
+    private var crashRetryTask: Task<Void, Never>?
+    /// The updater sets this while it swaps versions so a crash during its
+    /// own verification window is handled by its rollback, not by a retry.
+    var suppressAutoRestart = false
+
+    /// True when this launch is the first one (no database exists yet), so
+    /// the web UI should open once the server is up and the user lands in
+    /// Audiobookshelf's setup wizard.
+    private var openWebUIWhenRunning = false
     private var healthCheckTask: Task<Void, Never>?
     private let maxLogLines = 500
     /// Set right before we call process?.terminate() so the termination
@@ -141,8 +161,12 @@ final class ServerProcessManager: ObservableObject {
     /// the raw exit code.
     private var isIntentionalStop = false
 
-    func start() {
+    func start(isAutoRetry: Bool = false) {
         guard process == nil else { return }
+        crashRetryTask?.cancel()
+        crashRetryTask = nil
+        if !isAutoRetry { crashRetryCount = 0 }
+        if !isAutoRetry { openWebUIWhenRunning = !hasExistingDatabase }
         isIntentionalStop = false
         state = .starting
         appendLog("Starting server…")
@@ -200,6 +224,7 @@ final class ServerProcessManager: ObservableObject {
                 } else if proc.terminationStatus != 0 {
                     self.state = .crashed("exit code \(proc.terminationStatus)")
                     self.appendLog("Server exited with code \(proc.terminationStatus)")
+                    self.scheduleCrashRetry()
                 } else {
                     self.state = .stopped
                     self.appendLog("Server stopped cleanly.")
@@ -219,6 +244,8 @@ final class ServerProcessManager: ObservableObject {
     }
 
     func stop() {
+        crashRetryTask?.cancel()
+        crashRetryTask = nil
         isIntentionalStop = true
         healthCheckTask?.cancel()
         process?.terminate()
@@ -278,6 +305,37 @@ final class ServerProcessManager: ObservableObject {
         }
     }
 
+    // MARK: - Crash recovery
+
+    /// Retries after an unexpected non-zero exit: 2 s, 4 s, 8 s, 16 s, 32 s,
+    /// then gives up (a human is needed). Stop / Quit / a manual Start cancel
+    /// a pending retry, and every retry goes through the normal start() path.
+    private func scheduleCrashRetry() {
+        guard !suppressAutoRestart else { return }
+        guard crashRetryCount < maxCrashRetries else {
+            appendLog("Not auto-restarting after \(maxCrashRetries) attempts -- check the log, fix the cause, and start manually.")
+            return
+        }
+        crashRetryCount += 1
+        let delay = min(1 << crashRetryCount, 60)
+        appendLog("Auto-restarting in \(delay)s (attempt \(crashRetryCount)/\(maxCrashRetries))…")
+        crashRetryTask?.cancel()
+        crashRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.start(isAutoRetry: true)
+        }
+    }
+
+    // MARK: - First run
+
+    /// Audiobookshelf creates its SQLite database on first start, so no
+    /// *.sqlite file in config/ means nothing has been set up yet.
+    private var hasExistingDatabase: Bool {
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: configPath)) ?? []
+        return files.contains { $0.hasSuffix(".sqlite") }
+    }
+
     // MARK: - Login item
 
     /// Registers/unregisters the app as a login item via SMAppService.
@@ -321,7 +379,12 @@ final class ServerProcessManager: ObservableObject {
             if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
                 if case .running = state { /* already running, no-op */ } else {
                     state = .running
+                    crashRetryCount = 0
                     appendLog("Health check passed -- server is up.")
+                    if openWebUIWhenRunning {
+                        openWebUIWhenRunning = false
+                        NSWorkspace.shared.open(webUIURL)
+                    }
                 }
             }
         } catch {

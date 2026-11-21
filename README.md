@@ -9,6 +9,9 @@ A native macOS menu bar app that runs [Audiobookshelf](https://github.com/advply
 - Adds a menu bar icon with Start / Stop / Restart controls for the Audiobookshelf server
 - Runs entirely locally — server config and metadata live in `~/Library/Application Support`, your library files stay wherever you point Audiobookshelf's web UI at them
 - Optional "Open macABS at Login" and "Start Audiobookshelf Automatically" (see below)
+- Restarts the server automatically after an unexpected crash (2, 4, 8, 16, 32 seconds, then stops and waits for you; Stop and Quit always win)
+- On the very first start, opens the web UI so you land in Audiobookshelf's setup wizard
+- "View Logs…" opens a normal window; "Show Data Folder in Finder" opens the folder holding the database, metadata and backups
 - The menu bar icon shows the server state: headphones = running, pause = stopped, arrows = starting, warning triangle = crashed
 - Self-contained: the `.app` bundles its own Node runtime and Audiobookshelf build, so there's nothing to install separately
 
